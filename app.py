@@ -9,7 +9,7 @@ from shapely.geometry import Polygon, MultiPolygon
 import io
 
 st.set_page_config(page_title="Earthwork Grid Calculator", layout="wide")
-st.title("🧮 Web App Tính Khối Lượng Đào Đắp Tùy Chọn Ranh Giới")
+st.title("🧮 Tính Khối Lượng San Lấp")
 
 # --- KHỞI TẠO TRẠNG THÁI LƯU TRỮ (SESSION STATE) ---
 if "calculated" not in st.session_state:
