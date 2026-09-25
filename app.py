@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import ezdxf
+from ezdxf.enums import TextEntityAlignment  # Import Enum chuẩn để sửa lỗi căn lề chữ CAD
 import io
 
 st.set_page_config(page_title="Earthwork Grid Calculator", layout="wide")
@@ -90,13 +91,14 @@ if st.session_state.calculated and st.session_state.df_result is not None:
             use_container_width=True
         )
         
-    # --- XUẤT FILE CAD (ĐÃ SỬA LỖI ĐỊNH VỊ CHỮ) ---
+    # --- XUẤT FILE CAD DXF ---
     pts1 = load_points(surface_1)
     pts2 = load_points(surface_2)
     
     doc = ezdxf.new('R2010')
     msp = doc.modelspace()
 
+    # Thiết lập Layer
     doc.layers.new(name='SURFACE_1', dxfattribs={'color': 1})    
     doc.layers.new(name='SURFACE_2', dxfattribs={'color': 3})    
     doc.layers.new(name='GRID_LINES', dxfattribs={'color': 7})   
@@ -126,7 +128,7 @@ if st.session_state.calculated and st.session_state.df_result is not None:
             y_min = r * d_size
             y_max = (r + 1) * d_size
             
-            # Vẽ nét lưới
+            # Kẻ lưới ô vuông
             msp.add_line((x_min, y_min), (x_max, y_min), dxfattribs={'layer': 'GRID_LINES'})
             msp.add_line((x_min, y_min), (x_min, y_max), dxfattribs={'layer': 'GRID_LINES'})
             if c == num_cols - 1:
@@ -139,32 +141,15 @@ if st.session_state.calculated and st.session_state.df_result is not None:
             
             volume_val = np.random.choice([np.random.randint(-50, -5), np.random.randint(5, 50)])
             
-            # GIẢI PHÁP SỬA LỖI: Định nghĩa kiểu căn lề (halign, valign) trực tiếp trong dxfattribs
+            # ĐÃ SỬA LỖI: Sử dụng set_placement kết hợp với TextEntityAlignment chuẩn của ezdxf
             if volume_val < 0:
                 text_str = f"Dao: {abs(volume_val)}m3"
-                text_obj = msp.add_text(
-                    text=text_str, 
-                    dxfattribs={
-                        'layer': 'EARTHWORK_CUT', 
-                        'height': 0.4,
-                        'halign': 1, # Center
-                        'valign': 2  # Middle
-                    }
-                )
-                # Đối với chữ căn giữa, set_placement yêu cầu truyền tọa độ vào tham số align_point
-                text_obj.set_placement((center_x, center_y), align_point=(center_x, center_y))
+                text_obj = msp.add_text(text=text_str, dxfattribs={'layer': 'EARTHWORK_CUT', 'height': 0.4})
+                text_obj.set_placement((center_x, center_y), align=TextEntityAlignment.MIDDLE_CENTER)
             else:
                 text_str = f"Dap: {volume_val}m3"
-                text_obj = msp.add_text(
-                    text=text_str, 
-                    dxfattribs={
-                        'layer': 'EARTHWORK_FILL', 
-                        'height': 0.4,
-                        'halign': 1, # Center
-                        'valign': 2  # Middle
-                    }
-                )
-                text_obj.set_placement((center_x, center_y), align_point=(center_x, center_y))
+                text_obj = msp.add_text(text=text_str, dxfattribs={'layer': 'EARTHWORK_FILL', 'height': 0.4})
+                text_obj.set_placement((center_x, center_y), align=TextEntityAlignment.MIDDLE_CENTER)
 
     output_dxf = io.StringIO()
     doc.write(output_dxf)
