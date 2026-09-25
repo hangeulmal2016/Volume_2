@@ -4,10 +4,12 @@ import pandas as pd
 import ezdxf
 from ezdxf.enums import TextEntityAlignment
 from scipy.interpolate import griddata
+from scipy.spatial import ConvexHull  # Thuật toán tìm chu vi đường bao
+from shapely.geometry import Polygon, MultiPolygon # Thư viện tính toán cắt tỉa hình học
 import io
 
 st.set_page_config(page_title="Earthwork Grid Calculator", layout="wide")
-st.title("🧮 Web App Tính Khối Lượng Đào Đắp Lưới Ô Vuông Chuyên Nghiệp")
+st.title("🧮 Web App Tính Khối Lượng Đào Đắp Cắt Tỉa Lưới Theo Ranh Giới")
 
 # --- KHỞI TẠO TRẠNG THÁI LƯU TRỮ (SESSION STATE) ---
 if "calculated" not in st.session_state:
@@ -24,6 +26,8 @@ if "pts1_real" not in st.session_state:
     st.session_state.pts1_real = None
 if "pts2_real" not in st.session_state:
     st.session_state.pts2_real = None
+if "boundary_poly_coords" not in st.session_state:
+    st.session_state.boundary_poly_coords = None
 
 # --- GIAO DIỆN NHẬP LIỆU (SIDEBAR) ---
 st.sidebar.header("1. Cấu hình Dữ liệu Đầu vào")
@@ -41,6 +45,9 @@ def parse_surface_input(label):
 
 surface_1 = parse_surface_input("1 (Hiện trạng)")
 surface_2 = parse_surface_input("2 (Thiết kế)")
+
+st.sidebar.subheader("Ranh giới tính toán")
+boundary_mode = st.sidebar.selectbox("Loại dữ liệu ranh giới", ["Sử dụng chu vi bề mặt 2 làm ranh giới"])
 
 grid_size = st.sidebar.number_input("Kích thước cạnh ô lưới vuông (m)", min_value=1.0, value=5.0, step=1.0)
 
@@ -60,12 +67,12 @@ def load_real_points(surface_dict):
             cleaned_line = line.replace(",", " ")
             parts = cleaned_line.split()
             if len(parts) >= 3:
-                points.append([float(parts[0]), float(parts[1]), float(parts[2])])
+                points.append([float(parts), float(parts), float(parts)])
         except:
             continue
     return np.array(points) if len(points) > 0 else None
 
-# --- XỬ LÝ SỰ KIỆN TÍNH TOÁN VỚI THUẬT TOÁN NỘI SUY TUYẾN TÍNH (TIN-BASED) ---
+# --- XỬ LÝ SỰ KIỆN TÍNH TOÁN ---
 if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
     pts1 = load_real_points(surface_1)
     pts2 = load_real_points(surface_2)
@@ -73,43 +80,33 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
     st.session_state.pts1_real = pts1
     st.session_state.pts2_real = pts2
     
-    # 1. Kiểm tra tính hợp lệ dữ liệu đầu vào
     valid = True
     if surface_1["type"] == "txt" and pts1 is None:
-        st.sidebar.error("❌ Kiểm tra lại file TXT Bề mặt 1 (yêu cầu định dạng 3 cột: X Y Z).")
+        st.sidebar.error("❌ Kiểm tra lại file TXT Bề mặt 1.")
         valid = False
     if surface_2["type"] == "txt" and pts2 is None:
-        st.sidebar.error("❌ Kiểm tra lại file TXT Bề mặt 2 (yêu cầu định dạng 3 cột: X Y Z).")
+        st.sidebar.error("❌ Kiểm tra lại file TXT Bề mặt 2.")
+        valid = False
+    if surface_2["type"] == "const" and boundary_mode == "Sử dụng chu vi bề mặt 2 làm ranh giới":
+        st.sidebar.error("❌ Không thể lấy chu vi nếu Bề mặt 2 là mặt phẳng hằng số. Vui lòng up file TXT cho Bề mặt 2.")
         valid = False
         
     if valid:
-        # Xác định hộp giới hạn (Bounding Box) để phủ lưới ô vuông
-        all_x, all_y = [], []
-        if pts1 is not None:
-            all_x.extend(pts1[:, 0])
-            all_y.extend(pts1[:, 1])
-        if pts2 is not None:
-            all_x.extend(pts2[:, 0])
-            all_y.extend(pts2[:, 1])
-            
-        # Nếu cả 2 đều là mặt phẳng hằng số, tạo một vùng lưới mặc định từ (0,0) đến (50,50)
-        if len(all_x) == 0:
-            x_min, x_max, y_min, y_max = 0.0, 50.0, 0.0, 50.0
-        else:
-            x_min, x_max = min(all_x), max(all_x)
-            y_min, y_max = min(all_y), max(all_y)
-            
-        # Tạo ma trận tọa độ lưới ô vuông thực tế
+        hull = ConvexHull(pts2[:, :2])
+        boundary_vertices = pts2[hull.vertices, :2]
+        boundary_polygon = Polygon(boundary_vertices)
+        st.session_state.boundary_poly_coords = list(boundary_polygon.exterior.coords)
+        
+        x_min, y_min, x_max, y_max = boundary_polygon.bounds
+        
         x_coords = np.arange(x_min, x_max + grid_size, grid_size)
         y_coords = np.arange(y_min, y_max + grid_size, grid_size)
         
-        # Khởi tạo ma trận tích lũy để lưu trữ kết quả hiển thị bảng
         grid_rows_list = []
         cad_cells = []
         total_cut_vol = 0.0
         total_fill_vol = 0.0
         
-        # Lặp qua từng ô lưới để tính toán khối lượng theo phương pháp lăng trụ
         for r_idx in range(len(y_coords) - 1):
             row_cells_data = []
             y_start = y_coords[r_idx]
@@ -119,61 +116,66 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
                 x_start = x_coords[c_idx]
                 x_end = x_coords[c_idx + 1]
                 
-                # 4 đỉnh hình học góc ô lưới vuông
-                corners = np.array([
-                    [x_start, y_start],
-                    [x_end, y_start],
-                    [x_end, y_end],
-                    [x_start, y_end]
+                cell_poly = Polygon([
+                    (x_start, y_start),
+                    (x_end, y_start),
+                    (x_end, y_end),
+                    (x_start, y_end)
                 ])
                 
-                # Hàm nội suy cao độ cho từng đỉnh
-                def get_z_values(pts_data, surface_cfg):
+                if not cell_poly.intersects(boundary_polygon):
+                    row_cells_data.append("Ngoài RG")
+                    continue
+                
+                intersected_geo = cell_poly.intersection(boundary_polygon)
+                actual_area = intersected_geo.area
+                
+                grid_lines_to_draw = []
+                if isinstance(intersected_geo, Polygon):
+                    grid_lines_to_draw.append(list(intersected_geo.exterior.coords))
+                elif isinstance(intersected_geo, MultiPolygon):
+                    for poly in intersected_geo.geoms:
+                        grid_lines_to_draw.append(list(poly.exterior.coords))
+                
+                cx, cy = intersected_geo.centroid.x, intersected_geo.centroid.y
+                corners_eval = np.array([[cx, cy]])
+                
+                def get_z_at_centroid(pts_data, surface_cfg):
                     if surface_cfg["type"] == "const":
-                        return np.full(4, surface_cfg["value"])
+                        return surface_cfg["value"]
                     else:
-                        # Thực hiện nội suy Linear dựa trên cấu trúc tam giác phẳng ẩn (TIN)
-                        z_interp = griddata(pts_data[:, :2], pts_data[:, 2], corners, method='linear')
-                        # Nếu ngoài biên tam giác bị lỗi NaN, chuyển sang dùng IDW gần nhất để tránh mất ô lưới biên
-                        if np.any(np.isnan(z_interp)):
-                            z_interp = griddata(pts_data[:, :2], pts_data[:, 2], corners, method='nearest')
-                        return z_interp
+                        z_val = griddata(pts_data[:, :2], pts_data[:, 2], corners_eval, method='linear')
+                        if np.isnan(z_val):
+                            z_val = griddata(pts_data[:, :2], pts_data[:, 2], corners_eval, method='nearest')
+                        return z_val
                 
-                z1_corners = get_z_values(pts1, surface_1)
-                z2_corners = get_z_values(pts2, surface_2)
+                z1_center = get_z_at_centroid(pts1, surface_1)
+                z2_center = get_z_at_centroid(pts2, surface_2)
                 
-                # Tính độ chênh cao trung bình tại 4 đỉnh
-                dz = z2_corners - z1_corners
-                avg_dz = np.mean(dz)
+                dz = z2_center - z1_center
+                volume = actual_area * dz
                 
-                # Tính diện tích ô lưới hình học thực tế
-                cell_area = grid_size * grid_size
-                volume = cell_area * avg_dz
-                
-                # Phân định Đào hay Đắp
-                if volume < 0: # Cao độ thiết kế thấp hơn hiện trạng -> ĐÀO
+                if volume < 0:
                     cut_v = abs(volume)
                     fill_v = 0.0
                     cell_str = f"Đào: {cut_v:.1f} m³"
-                else: # Cao độ thiết kế cao hơn hiện trạng -> ĐẮP
+                else:
                     cut_v = 0.0
                     fill_v = volume
                     cell_str = f"Đắp: {fill_v:.1f} m³"
                     
                 total_cut_vol += cut_v
                 total_fill_vol += fill_v
-                row_cells_data.append(cell_str)
+                row_cells_data.append(f"{cell_str} ({actual_area:.1f}㎡)")
                 
-                # Lưu trữ thông tin hình học phục vụ riêng cho Render CAD DXF
                 cad_cells.append({
-                    'x_min': x_start, 'x_max': x_end,
-                    'y_min': y_start, 'y_max': y_end,
+                    'lines': grid_lines_to_draw,
+                    'cx': cx, 'cy': cy,
                     'volume': -cut_v if cut_v > 0 else fill_v
                 })
                 
             grid_rows_list.append(row_cells_data)
             
-        # Chuyển đổi dữ liệu sang định dạng DataFrame dạng hàng và cột để hiển thị trực quan
         if len(grid_rows_list) > 0:
             max_cols = max(len(r) for r in grid_rows_list)
             df_cols = [f"Cột {c+1}" for c in range(max_cols)]
@@ -186,34 +188,30 @@ if st.sidebar.button("👉 Tiến hành tính toán khối lượng"):
             st.session_state.calculated = True
 # --- HIỂN THỊ KẾT QUẢ VÙNG TRUNG TÂM (PERSISTENT RENDER) ---
 if st.session_state.calculated and st.session_state.df_result is not None:
-    st.success("🎉 Đã hoàn thành thuật toán tính toán khối lượng chính xác thực địa!")
+    st.success("🎉 Đã hoàn thành tính toán khối lượng đào đắp cắt tỉa theo ranh giới chu vi Bề mặt 2!")
     
-    # 1. Thống kê tổng hợp (Metrics)
     col1, col2, col3 = st.columns(3)
     col1.metric("Tổng khối lượng ĐÀO 🟥", f"{st.session_state.total_cut:,.2f} m³")
     col2.metric("Tổng khối lượng ĐẮP 🟩", f"{st.session_state.total_fill:,.2f} m³")
     net_diff = st.session_state.total_fill - st.session_state.total_cut
     col3.metric("Khối lượng cân bằng chênh lệch", f"{net_diff:,.2f} m³", delta_color="inverse")
 
-    # 2. Bảng hiển thị kết quả phân phối dạng hàng/cột
-    st.subheader("📊 Bảng phân bố lưới ô vuông (Kết quả tính toán thực tế)")
+    st.subheader("📊 Bảng phân bố lưới ô vuông đã cắt tỉa (Diện tích giao ㎡ thực tế)")
     st.dataframe(st.session_state.df_result, use_container_width=True)
     
-    # 3. Xuất file báo cáo
     st.subheader("💾 Tải về file thành phẩm tích hợp số liệu thực")
     dwn_col1, dwn_col2 = st.columns(2)
     
-    # Xuất Excel từ RAM
     output_excel = io.BytesIO()
     with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
-        st.session_state.df_result.to_excel(writer, index=False, sheet_name="Khoi_Luong_Thuc_Te")
+        st.session_state.df_result.to_excel(writer, index=False, sheet_name="Khoi_Luong_Cat_Tia")
     excel_data = output_excel.getvalue()
     
     with dwn_col1:
         st.download_button(
             label="📥 Tải xuống Bảng tính Excel thực tế (.xlsx)",
             data=excel_data,
-            file_name="khoi_luong_chinh_xac.xlsx",
+            file_name="khoi_luong_cat_tia_ranh_gioi.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
@@ -223,48 +221,46 @@ if st.session_state.calculated and st.session_state.df_result is not None:
     msp = doc.modelspace()
 
     # Thiết lập Layer hệ thống
-    doc.layers.new(name='SURFACE_1', dxfattribs={'color': 1})    
-    doc.layers.new(name='SURFACE_2', dxfattribs={'color': 3})    
-    doc.layers.new(name='GRID_LINES', dxfattribs={'color': 7})   
-    doc.layers.new(name='EARTHWORK_CUT', dxfattribs={'color': 1}) 
-    doc.layers.new(name='EARTHWORK_FILL', dxfattribs={'color': 3})
+    doc.layers.new(name='SURFACE_1', dxfattribs={'color': 1})    # Đỏ (Hiện trạng)
+    doc.layers.new(name='SURFACE_2', dxfattribs={'color': 3})    # Xanh lá (Các điểm và cao độ Thiết kế)
+    doc.layers.new(name='GRID_LINES', dxfattribs={'color': 7})   # Trắng/Đen (Đường lưới ô vuông bị cắt tỉa)
+    doc.layers.new(name='EARTHWORK_CUT', dxfattribs={'color': 1}) # Đỏ (Khối lượng Đào)
+    doc.layers.new(name='EARTHWORK_FILL', dxfattribs={'color': 3})# Xanh lá (Khối lượng Đắp)
 
-    # Vẽ chính xác tọa độ thực các điểm Bề mặt 1 lên CAD
+    # Vẽ các điểm của Bề mặt 1 lên Layer SURFACE_1
     if st.session_state.pts1_real is not None:
         for pt in st.session_state.pts1_real:
-            x, y, z = float(pt[0]), float(pt[1]), float(pt[2])
+            x, y, z = float(pt), float(pt), float(pt)
             msp.add_point((x, y, z), dxfattribs={'layer': 'SURFACE_1'})
             msp.add_text(text=f"{z:.2f}", dxfattribs={'layer': 'SURFACE_1', 'height': 0.3}).set_placement((x + 0.2, y, z))
 
-    # Vẽ chính xác tọa độ thực các điểm Bề mặt 2 lên CAD
+    # Vẽ các điểm của Bề mặt 2 lên Layer SURFACE_2
     if st.session_state.pts2_real is not None:
         for pt in st.session_state.pts2_real:
-            x, y, z = float(pt[0]), float(pt[1]), float(pt[2])
+            x, y, z = float(pt), float(pt), float(pt)
             msp.add_point((x, y, z), dxfattribs={'layer': 'SURFACE_2'})
             msp.add_text(text=f"{z:.2f}", dxfattribs={'layer': 'SURFACE_2', 'height': 0.3}).set_placement((x + 0.2, y, z))
 
-    # Tái cấu trúc hình học lưới ô vuông thực địa và ghi số liệu vào tâm ô lưới
-    unique_lines = set()
+    # ĐÃ CẬP NHẬT: Vẽ đường ranh giới kín màu VÀNG ('color': 2) nhưng vẫn thuộc Layer SURFACE_2 để dễ nhận biết
+    if st.session_state.boundary_poly_coords is not None:
+        msp.add_lwpolyline(
+            st.session_state.boundary_poly_coords, 
+            dxfattribs={
+                'layer': 'SURFACE_2', 
+                'color': 2,            # Mã màu AutoCAD số 2 = Vàng (Yellow)
+                'const_width': 0.15     # Độ dày nét vẽ tăng nhẹ để làm nổi bật đường bao
+            }
+        )
+
+    # Vẽ hệ lưới ô vuông đã được CẮT TỈA theo ranh giới (Layer GRID_LINES)
     for cell in st.session_state.cad_grid_data:
-        x1, x2, y1, y2 = cell['x_min'], cell['x_max'], cell['y_min'], cell['y_max']
-        
-        # Gom các đoạn thẳng bao quanh ô lưới tránh trùng nét vẽ đè trong CAD
-        lines_to_add = [
-            ((x1, y1), (x2, y1)),
-            ((x1, y1), (x1, y2)),
-            ((x2, y1), (x2, y2)),
-            ((x1, y2), (x2, y2))
-        ]
-        for l in lines_to_add:
-            # Sắp xếp tọa độ để loại trùng lặp cặp điểm đầu cuối
-            sorted_line = tuple(sorted(l))
-            if sorted_line not in unique_lines:
-                unique_lines.add(sorted_line)
-                msp.add_line(l[0], l[1], dxfattribs={'layer': 'GRID_LINES'})
+        for poly_line in cell['lines']:
+            for i in range(len(poly_line) - 1):
+                p1 = poly_line[i]
+                p2 = poly_line[i+1]
+                msp.add_line(p1, p2, dxfattribs={'layer': 'GRID_LINES'})
                 
-        # Tính toán tọa độ tâm chính xác
-        cx = (x1 + x2) / 2
-        cy = (y1 + y2) / 2
+        cx, cy = cell['cx'], cell['cy']
         val = cell['volume']
         
         if val < 0:
@@ -282,11 +278,11 @@ if st.session_state.calculated and st.session_state.df_result is not None:
     
     with dwn_col2:
         st.download_button(
-            label="📥 Tải xuống Bản vẽ CAD Lưới Ô Vuông (.dxf)",
+            label="📥 Tải xuống Bản vẽ CAD Lưới Đã Cắt Tỉa (.dxf)",
             data=dxf_data,
-            file_name="khoi_luong_luoi_o_vuong.dxf",
+            file_name="khoi_luong_cat_tia_chinh_xac.dxf",
             mime="application/dxf",
             use_container_width=True
         )
 else:
-    st.info("💡 Hướng dẫn: Tải lên file TXT hoặc thiết lập Cao độ cố định ở Sidebar trái, sau đó bấm nút 'Tiến hành tính toán khối lượng'.")
+    st.info("💡 Hướng dẫn: Tải lên file TXT ở Sidebar trái, hệ thống sẽ tự động bóc tách đường chu vi của Bề mặt 2 để làm ranh giới màu vàng.")
